@@ -1,0 +1,38 @@
+\begin{thebibliography}{4}
+\newcommand{\enquote}[1]{``#1''}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\providecommand{\urlprefix}{URL }
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi:\discretionary{}{}{}#1}\else
+  \providecommand{\doi}{doi:\discretionary{}{}{}\begingroup
+  \urlstyle{rm}\Url}\fi
+\providecommand{\eprint}[2][]{\url{#2}}
+
+\bibitem[{Andersen and Bollerslev(1998)}]{AndersonBollerslev}
+Andersen, Bollerslev (1998).
+\newblock \emph{Answering the skeptics: Yes, standard volatility models do
+  provide accurate forecasts}.
+\newblock
+  \urlprefix\url{http://public.econ.duke.edu/~boller/Published_Papers/ier_98.pdf}.
+
+\bibitem[{Bollerslev(1986)}]{Garch}
+Bollerslev (1986).
+\newblock \emph{Generalized Autoregressive Conditional Heteroskedasticity}.
+\newblock
+  \urlprefix\url{http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.468.2892&rep=rep1&type=pdf}.
+
+\bibitem[{Zielak(2017)}]{Kaggle}
+Zielak (2017).
+\newblock \emph{Kaggle Data}.
+\newblock
+  \urlprefix\url{https://www.kaggle.com/mczielinski/bitcoin-historical-data}.
+
+\bibitem[{Ñíguez(2008)}]{MonthlyVol}
+Ñíguez TM (2008).
+\newblock \emph{Predicting the monthly volatility of the EuroStoxx 50 using
+  data sampled at different frequencies}.
+\newblock
+  \urlprefix\url{https://orff.uc3m.es/bitstream/handle/10016/11395/predicting_niguez_IFL_WP.pdf;jsessionid=129AA96FBE65A587C6B4A964D4682513?sequence=1}.
+
+\end{thebibliography}

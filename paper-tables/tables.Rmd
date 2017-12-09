@@ -1,0 +1,491 @@
+---
+title: "Paper tables"
+author: "Davis Vaughan"
+date: "12/2/2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(huxtable)
+library(tibble)
+library(purrr)
+library(tidyr)
+```
+
+
+```{r , results='asis', echo=FALSE}
+fit <- readr::read_rds("models/garch-model-5-min.rds")
+fit_daily <- readr::read_rds("models/garch-model-daily.rds")
+
+prepare_coef_norm <- function(matcoef) {
+  matcoef %>%
+    as_tibble() %>%
+    slice(-1) %>%
+    add_column(Coefficient = c("$\\alpha$", "$\\beta$"), .before = 1) %>%
+    select(-` t value`)
+}
+
+prepare_coef_student_t <- function(matcoef) {
+  matcoef %>%
+    as_tibble() %>%
+    slice(-1) %>%
+    add_column(Coefficient = c("$\\alpha$", "$\\beta$", "$\\nu$"), .before = 1) %>%
+    select(-` t value`)
+}
+
+df_coef <- tibble::tibble(
+  f = c(prepare_coef_norm, prepare_coef_student_t, 
+        prepare_coef_norm, prepare_coef_student_t),
+  
+  params = list( list(fit$fit[[1]]@fit$robust.matcoef),
+                 list(fit$fit[[2]]@fit$robust.matcoef),
+                 list(fit_daily$fit[[1]]@fit$robust.matcoef),
+                 list(fit_daily$fit[[2]]@fit$robust.matcoef))
+)
+
+all_coef <- purrr::invoke_map(df_coef$f, .x = df_coef$params) %>%
+  bind_rows() %>%
+  select(everything(), 
+         `Robust Std Error` = ` Std. Error`,
+         `P-value` = `Pr(>|t|)`)
+  
+triple_blank <- function() {
+  c("", "", "")
+}
+
+ht <- huxtable(all_coef) %>%
+  add_colnames() %>%
+  set_escape_contents(everywhere, 1, FALSE) %>%
+  insert_row("Normal: 5-min",    triple_blank(), after = 1) %>%
+  insert_row("Student-t: 5-min", triple_blank(), after = 4) %>%
+  insert_row("Normal: daily",    triple_blank(), after = 8) %>%
+  insert_row("Student-t: daily", triple_blank(), after = 11) %>%
+  set_number_format(everywhere, everywhere, "%5.3f") %>%
+  set_bold(matrix(c(2,5,9,12)), 1, TRUE) %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_align(everywhere, everywhere, 'center') %>%
+  set_align(everywhere, 1, 'right') %>%
+  set_bottom_border(matrix(c(1, 4, 8, 11)), everywhere, value = .3) %>%
+  set_right_border(everywhere, 1, .3) %>%
+  set_left_padding(everywhere, 1, -30)
+
+ht[1,1] <- ""
+
+ht
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+#### ---------------------------------------------------------------------------
+#### Load packages
+
+library(readr)
+library(tidyquant)
+library(tidyverse)
+library(rlang)
+
+#### ---------------------------------------------------------------------------
+#### Parameters 
+
+parameters <- read_rds("data/cleaned/parameters.rds")
+
+#### ---------------------------------------------------------------------------
+#### Load data
+
+prices_5min <- read_csv("data/cleaned/cleaned-bitstamp.csv")
+prices_min <- read_csv("data/cleaned/cleaned-bitstamp-minutely.csv")
+
+daily_forc_from_5min  <- read_rds("forecasts/forecast-5-min.rds")
+daily_forc_from_daily <- read_rds("forecasts/forecast-daily.rds") %>%
+  filter(date > as.POSIXct("2017-06-30 23:59:00", tz = "UTC"))
+
+all_forecasts <- bind_rows(
+  daily_forc_from_5min %>%
+    mutate(forc_style = "5min"),
+  daily_forc_from_daily %>%
+    mutate(forc_style = "daily") %>%
+    mutate(date = lubridate::floor_date(date, "5 min"))
+)
+
+#### ---------------------------------------------------------------------------
+#### Calculate OOS Returns
+
+# 5min and daily OOS returns
+returns_oos <- bind_rows(
+  
+  # 5 minute returns from 5-minute data
+  prices_5min %>%
+    mutate(return = log(adjusted) - log(lag(adjusted))) %>%
+    slice(-1) %>%
+    select(-adjusted) %>%
+    filter(date > parameters$forecast_start_date) %>%
+    mutate(return_type = "5min"),
+  
+  # Daily returns from minutely data
+  prices_min %>%
+    tq_transmute(adjusted, dailyReturn, type = "log", col_rename = "return") %>%
+    slice(-1) %>%
+    filter(date > parameters$forecast_start_date) %>%
+    mutate(return_type = "daily") %>%
+    mutate(date = lubridate::floor_date(date, "5 min"))
+)
+
+#### ---------------------------------------------------------------------------
+#### Calculate variance proxies over the forecast period
+
+# Collapse a date column to the end of the day
+collapse_to_daily <- function(x) {
+  x %>% 
+    mutate(year = year(date),
+           month = month(date),
+           day   = day(date)) %>% 
+    group_by(year, month, day, add = TRUE) %>%
+    mutate(date = max(date)) %>%
+    group_by(!!! groups(x)) %>%
+    select(-year, -month, -day)
+}
+
+# Calculate daily variance proxy from 5min data as realized variance
+# Quadratic variance increments
+realized_daily_variance <- returns_oos %>%
+  filter(return_type == "5min") %>%
+  collapse_to_daily() %>%
+  group_by(date) %>%
+  summarise(realized_variance = sum(return ^ 2))
+
+# Calculate daily variance proxy as squared daily returns
+squared_daily_return <- returns_oos %>%
+  filter(return_type == "daily") %>%
+  transmute(
+    date = date,
+    squared_return = return ^ 2)
+
+all_table_data <- all_forecasts %>%
+  left_join(realized_daily_variance, by = "date") %>%
+  left_join(squared_daily_return, by = "date")
+
+# Add the 1 point removed data
+filtered_5min <- all_forecasts %>%
+  left_join(realized_daily_variance, by = "date") %>%
+  left_join(squared_daily_return, by = "date") %>%
+  filter(date != as.POSIXct("2017-07-21 23:55:00", tz = parameters$tz)) %>%
+  filter(forc_style == "5min") %>%
+  mutate(forc_style = "5min_filtered")
+
+all_table_data <- all_table_data %>%
+  bind_rows(filtered_5min)
+
+saveRDS(all_table_data, "paper-tables/performance_table_data.rds")
+```
+
+```{r, results = 'asis', echo = FALSE}
+all_table_data <- readRDS("paper-tables/performance_table_data.rds")
+
+mse_mape <- all_table_data %>%
+  filter(distribution == "Normal") %>%
+  select(-distribution) %>%
+  gather(key = "proxy", value = "variance_proxy", -date, -daily_variance_forecast, -forc_style) %>%
+  group_by(forc_style, proxy) %>%
+  summarise(mse  = mean((variance_proxy - daily_variance_forecast) ^ 2),
+            rmse = sqrt(mse),
+            mape = mean(abs(variance_proxy - daily_variance_forecast) / sqrt(variance_proxy))) %>%
+  gather(key = "metric", value = "value", -forc_style, -proxy) %>%
+  spread(forc_style, value) %>%
+  filter(metric != "mse")
+
+MZ <- all_table_data %>%
+  filter(distribution == "Normal") %>%
+  select(-distribution) %>%
+  gather(key = "proxy", value = "variance_proxy", -date, -daily_variance_forecast, -forc_style) %>%
+  group_by(forc_style, proxy) %>%
+  nest() %>%
+  mutate(lm_fit = map(data, ~lm(variance_proxy ~ daily_variance_forecast, data = .x)),
+         tidy = map(lm_fit, broom::tidy),
+         glance = map(lm_fit, broom::glance)) 
+
+MZ_coef <- MZ %>%
+  unnest(tidy, .drop = TRUE) %>%
+  select(forc_style:std.error) %>%
+  gather(key, value, -forc_style, -proxy, -term) %>%
+  unite(col = "metric", term, key) %>%
+  spread(forc_style, value)
+
+MZ_r2 <- MZ %>%
+  unnest(glance, .drop = TRUE) %>%
+  select(forc_style:r.squared) %>%
+  gather(metric, value, r.squared) %>%
+  spread(forc_style, value)
+
+hux_data <- bind_rows(mse_mape, MZ_coef, MZ_r2) %>%
+  mutate(metric = recode(metric, "mape" = "MAPE", "rmse" = "RMSE", 
+                         "(Intercept)_estimate" = "MZ Intercept", 
+                         "(Intercept)_std.error" = "MZ Intercept Std. Error",
+                         "daily_variance_forecast_estimate" = "MZ Slope",
+                         "daily_variance_forecast_std.error" = "MZ Slope Std. Error",
+                         "r.squared" = "MZ $R^2$")) %>%
+  arrange(proxy) %>%
+  select(metric, "5-min" = "5min", "daily" = "daily", 
+         "5-min filtered" = "5min_filtered")
+
+  
+triple_blank <- function() {
+  c("", "", "")
+}
+
+hux_data <- hux_data %>%
+  mutate_if(is.numeric, round, 5)
+
+hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),] <- mutate_if(hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),],
+                                                                                   is.double, 
+                                                                                   funs(paste0("(", ., ")")))
+
+hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),] <- mutate(hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),],
+                                                                                metric = replace(metric, 1:4, NA))
+
+ht <- hux_data %>%
+  huxtable() %>%
+  
+  # Column names
+  add_colnames() %>%
+  
+  # Proxy rows
+  insert_row("Proxy: RV",    triple_blank(), after = 1) %>%
+  insert_row("Proxy: $r^2$", triple_blank(), after = 9) %>%
+  
+  # Number rounding
+  set_number_format(everywhere, everywhere, "%5.4f") %>%
+  
+  # Bold
+  set_bold(matrix(c(2,10)), 1, TRUE) %>%
+  set_bold(1, everywhere, TRUE) %>%
+  
+  # Alignment
+  set_align(everywhere, everywhere, 'center') %>%
+  set_align(everywhere, 1, 'right') %>%
+  
+  # Padding
+  set_all_padding(value = 10) %>%
+  set_top_padding(c(6, 8, 14, 16), everywhere, 0) %>%
+  set_bottom_padding(c(5, 7, 13, 15), everywhere, 0) %>%
+  set_left_padding(everywhere, 1, -40) %>%
+
+  # Borders
+  set_bottom_border(matrix(c(1, 9)), everywhere, value = .3) %>%
+  set_right_border(everywhere, 1, .3) %>%
+  
+  # Escape latex
+  set_escape_contents(everywhere, 1, FALSE) %>%
+  set_escape_contents(1, everywhere, FALSE)
+
+
+ht[1,1] <- ""
+
+ht
+```
+
+
+
+```{r, eval = FALSE}
+#### ---------------------------------------------------------------------------
+#### Load packages
+
+library(readr)
+library(tidyquant)
+library(tidyverse)
+library(rlang)
+
+theme_set(theme_minimal())
+
+#### ---------------------------------------------------------------------------
+#### Parameters 
+
+parameters <- read_rds("data/cleaned/parameters.rds")
+
+#### ---------------------------------------------------------------------------
+#### Load data
+
+prices_5min <- read_csv("data/cleaned/cleaned-bitstamp.csv")
+prices_min <- read_csv("data/cleaned/cleaned-bitstamp-minutely.csv")
+
+daily_forc_from_5min  <- read_rds("forecasts/forecast-5-min.rds")
+daily_forc_from_daily <- read_rds("forecasts/forecast-daily.rds") %>%
+  filter(date > as.POSIXct("2017-06-30 23:59:00", tz = "UTC"))
+daily_forc_from_5min_filtered <- read_rds("forecasts/forecast-5-min-filtered.rds")
+
+all_forecasts <- bind_rows(
+  daily_forc_from_5min %>%
+    mutate(forc_style = "5min"),
+  daily_forc_from_5min_filtered %>%
+    mutate(forc_style = "5min_filtered"),
+  daily_forc_from_daily %>%
+    mutate(forc_style = "daily") %>%
+    mutate(date = lubridate::floor_date(date, "5 min"))
+)
+
+#### ---------------------------------------------------------------------------
+#### Calculate OOS Returns
+
+# 5min and daily OOS returns
+returns_oos <- bind_rows(
+  
+  # 5 minute returns from 5-minute data
+  prices_5min %>%
+    mutate(return = log(adjusted) - log(lag(adjusted))) %>%
+    slice(-1) %>%
+    select(-adjusted) %>%
+    filter(date > parameters$forecast_start_date) %>%
+    mutate(return_type = "5min"),
+  
+  # Daily returns from minutely data
+  prices_min %>%
+    tq_transmute(adjusted, dailyReturn, type = "log", col_rename = "return") %>%
+    slice(-1) %>%
+    filter(date > parameters$forecast_start_date) %>%
+    mutate(return_type = "daily") %>%
+    mutate(date = lubridate::floor_date(date, "5 min"))
+)
+
+#### ---------------------------------------------------------------------------
+#### Calculate variance proxies over the forecast period
+
+# Collapse a date column to the end of the day
+collapse_to_daily <- function(x) {
+  x %>% 
+    mutate(year = year(date),
+           month = month(date),
+           day   = day(date)) %>% 
+    group_by(year, month, day, add = TRUE) %>%
+    mutate(date = max(date)) %>%
+    group_by(!!! groups(x)) %>%
+    select(-year, -month, -day)
+}
+
+# Calculate daily variance proxy from 5min data as realized variance
+# Quadratic variance increments
+realized_daily_variance <- returns_oos %>%
+  filter(return_type == "5min") %>%
+  collapse_to_daily() %>%
+  group_by(date) %>%
+  summarise(realized_variance = sum(return ^ 2))
+
+# Calculate daily variance proxy as squared daily returns
+squared_daily_return <- returns_oos %>%
+  filter(return_type == "daily") %>%
+  transmute(
+    date = date,
+    squared_return = return ^ 2)
+
+all_table_data <- all_forecasts %>%
+  left_join(realized_daily_variance, by = "date") %>%
+  left_join(squared_daily_return, by = "date")
+
+saveRDS(all_table_data, "paper-tables/performance_table_data_filtered.rds")
+```
+
+```{r, results = 'asis', echo = FALSE}
+all_table_data <- readRDS("paper-tables/performance_table_data_filtered.rds")
+
+mse_mape <- all_table_data %>%
+  filter(distribution == "Normal") %>%
+  select(-distribution) %>%
+  gather(key = "proxy", value = "variance_proxy", -date, -daily_variance_forecast, -forc_style) %>%
+  group_by(forc_style, proxy) %>%
+  summarise(mse  = mean((variance_proxy - daily_variance_forecast) ^ 2),
+            rmse = sqrt(mse),
+            mape = mean(abs(variance_proxy - daily_variance_forecast) / sqrt(variance_proxy))) %>%
+  gather(key = "metric", value = "value", -forc_style, -proxy) %>%
+  spread(forc_style, value) %>%
+  filter(metric != "mse")
+
+MZ <- all_table_data %>%
+  filter(distribution == "Normal") %>%
+  select(-distribution) %>%
+  gather(key = "proxy", value = "variance_proxy", -date, -daily_variance_forecast, -forc_style) %>%
+  group_by(forc_style, proxy) %>%
+  nest() %>%
+  mutate(lm_fit = map(data, ~lm(variance_proxy ~ daily_variance_forecast, data = .x)),
+         tidy = map(lm_fit, broom::tidy),
+         glance = map(lm_fit, broom::glance)) 
+
+MZ_coef <- MZ %>%
+  unnest(tidy, .drop = TRUE) %>%
+  select(forc_style:std.error) %>%
+  gather(key, value, -forc_style, -proxy, -term) %>%
+  unite(col = "metric", term, key) %>%
+  spread(forc_style, value)
+
+MZ_r2 <- MZ %>%
+  unnest(glance, .drop = TRUE) %>%
+  select(forc_style:r.squared) %>%
+  gather(metric, value, r.squared) %>%
+  spread(forc_style, value)
+
+hux_data <- bind_rows(mse_mape, MZ_coef, MZ_r2) %>%
+  mutate(metric = recode(metric, "mape" = "MAPE", "rmse" = "RMSE", 
+                         "(Intercept)_estimate" = "MZ Intercept", 
+                         "(Intercept)_std.error" = "MZ Intercept Std. Error",
+                         "daily_variance_forecast_estimate" = "MZ Slope",
+                         "daily_variance_forecast_std.error" = "MZ Slope Std. Error",
+                         "r.squared" = "MZ $R^2$")) %>%
+  arrange(proxy) %>%
+  select(metric, "5-min filtered" = "5min_filtered")
+
+  
+triple_blank <- function() {
+  c("", "", "")
+}
+
+hux_data <- hux_data %>%
+  mutate_if(is.numeric, round, 5)
+
+hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),] <- mutate_if(hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),],
+                                                                                   is.double, 
+                                                                                   funs(paste0("(", ., ")")))
+
+hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),] <- mutate(hux_data[with(hux_data, which(metric == "MZ Intercept Std. Error" | metric == "MZ Slope Std. Error")),],
+                                                                                metric = replace(metric, 1:4, NA))
+
+ht <- hux_data %>%
+  huxtable() %>%
+  
+  # Column names
+  add_colnames() %>%
+  
+  # Proxy rows
+  insert_row("Proxy: RV",    "", after = 1) %>%
+  insert_row("Proxy: $r^2$", "", after = 9) %>%
+  
+  # Number rounding
+  set_number_format(everywhere, everywhere, "%5.4f") %>%
+  
+  # Bold
+  set_bold(matrix(c(2,10)), 1, TRUE) %>%
+  set_bold(1, everywhere, TRUE) %>%
+  
+  # Alignment
+  set_align(everywhere, everywhere, 'center') %>%
+  set_align(everywhere, 1, 'right') %>%
+  
+  # Padding
+  set_all_padding(value = 10) %>%
+  set_top_padding(c(6, 8, 14, 16), everywhere, 0) %>%
+  set_bottom_padding(c(5, 7, 13, 15), everywhere, 0) %>%
+  set_left_padding(everywhere, 1, -40) %>%
+
+  # Borders
+  set_bottom_border(matrix(c(1, 9)), everywhere, value = .3) %>%
+  set_right_border(everywhere, 1, .3) %>%
+  
+  # Escape latex
+  set_escape_contents(everywhere, 1, FALSE) %>%
+  set_escape_contents(1, everywhere, FALSE)
+
+
+ht[1,1] <- ""
+
+ht
+```
